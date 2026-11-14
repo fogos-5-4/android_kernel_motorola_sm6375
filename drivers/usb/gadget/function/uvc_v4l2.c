@@ -342,11 +342,6 @@ uvc_v4l2_enum_frameintervals(struct file *file, void *fh,
 		return 0;
 	} else if (fival->index == 1) {
 		fival->type = V4L2_FRMIVAL_TYPE_DISCRETE;
-		fival->discrete.numerator = 166666;
-		fival->discrete.denominator = 10000000;
-		return 0;
-	} else if (fival->index == 2) {
-		fival->type = V4L2_FRMIVAL_TYPE_DISCRETE;
 		fival->discrete.numerator = 666666;
 		fival->discrete.denominator = 10000000;
 		return 0;
