@@ -11,6 +11,7 @@
 #include <linux/kernel.h>
 #include <linux/list.h>
 #include <linux/usb/g_uvc.h>
+#include <linux/usb/video.h>
 #include <linux/videodev2.h>
 #include <linux/vmalloc.h>
 #include <linux/wait.h>
@@ -94,6 +95,263 @@ uvc_v4l2_get_format(struct file *file, void *fh, struct v4l2_format *fmt)
 	fmt->fmt.pix.priv = 0;
 
 	return 0;
+}
+
+static const struct uvc_descriptor_header * const *
+uvc_v4l2_get_streaming_desc(struct uvc_device *uvc)
+{
+	struct usb_composite_dev *cdev = uvc->func.config ? uvc->func.config->cdev : NULL;
+	enum usb_device_speed speed = cdev && cdev->gadget ? cdev->gadget->speed : USB_SPEED_UNKNOWN;
+
+	if ((speed == USB_SPEED_SUPER || speed == USB_SPEED_SUPER_PLUS) && uvc->desc.ss_streaming)
+		return uvc->desc.ss_streaming;
+	if (speed == USB_SPEED_HIGH && uvc->desc.hs_streaming)
+		return uvc->desc.hs_streaming;
+	if (speed == USB_SPEED_FULL && uvc->desc.fs_streaming)
+		return uvc->desc.fs_streaming;
+
+	if (uvc->desc.hs_streaming)
+		return uvc->desc.hs_streaming;
+	if (uvc->desc.ss_streaming)
+		return uvc->desc.ss_streaming;
+	if (uvc->desc.fs_streaming)
+		return uvc->desc.fs_streaming;
+
+	return NULL;
+}
+
+static u32 uvc_v4l2_sub_type_to_fcc(u8 subtype)
+{
+	switch (subtype) {
+	case UVC_VS_FORMAT_UNCOMPRESSED:
+		return V4L2_PIX_FMT_YUYV;
+	case UVC_VS_FORMAT_MJPEG:
+		return V4L2_PIX_FMT_MJPEG;
+	case UVC_VS_FORMAT_FRAME_BASED:
+		return V4L2_PIX_FMT_H264;
+	default:
+		return 0;
+	}
+}
+
+static bool uvc_v4l2_is_format(u8 subtype)
+{
+	return subtype == UVC_VS_FORMAT_UNCOMPRESSED ||
+	       subtype == UVC_VS_FORMAT_MJPEG ||
+	       subtype == UVC_VS_FORMAT_FRAME_BASED;
+}
+
+static bool uvc_v4l2_is_frame(u8 subtype)
+{
+	return subtype == UVC_VS_FRAME_UNCOMPRESSED ||
+	       subtype == UVC_VS_FRAME_MJPEG ||
+	       subtype == UVC_VS_FRAME_FRAME_BASED;
+}
+
+static void uvc_v4l2_get_frame_info(const struct uvc_descriptor_header *h,
+				    u16 *width, u16 *height,
+				    u8 *interval_type, const __le32 **intervals)
+{
+	if (h->bDescriptorSubType == UVC_VS_FRAME_FRAME_BASED) {
+		const struct uvc_frame_framebased *frm =
+			(const struct uvc_frame_framebased *)h;
+		*width = le16_to_cpu(frm->wWidth);
+		*height = le16_to_cpu(frm->wHeight);
+		*interval_type = frm->bFrameIntervalType;
+		*intervals = (const __le32 *)frm->dwFrameInterval;
+	} else {
+		const struct uvc_frame_uncompressed *frm =
+			(const struct uvc_frame_uncompressed *)h;
+		*width = le16_to_cpu(frm->wWidth);
+		*height = le16_to_cpu(frm->wHeight);
+		*interval_type = frm->bFrameIntervalType;
+		*intervals = frm->dwFrameInterval;
+	}
+}
+
+static int
+uvc_v4l2_enum_format(struct file *file, void *fh, struct v4l2_fmtdesc *f)
+{
+	struct video_device *vdev = video_devdata(file);
+	struct uvc_device *uvc = video_get_drvdata(vdev);
+	const struct uvc_descriptor_header * const *cls;
+	unsigned int index = 0;
+
+	if (f->type != V4L2_BUF_TYPE_VIDEO_OUTPUT)
+		return -EINVAL;
+
+	cls = uvc_v4l2_get_streaming_desc(uvc);
+	if (cls) {
+		for (; *cls; ++cls) {
+			const struct uvc_descriptor_header *h = *cls;
+
+			if (!uvc_v4l2_is_format(h->bDescriptorSubType))
+				continue;
+
+			if (index == f->index) {
+				f->pixelformat = uvc_v4l2_sub_type_to_fcc(h->bDescriptorSubType);
+				if (h->bDescriptorSubType == UVC_VS_FORMAT_UNCOMPRESSED) {
+					strlcpy(f->description, "YUV 4:2:2 (YUYV)", sizeof(f->description));
+					f->flags = 0;
+				} else if (h->bDescriptorSubType == UVC_VS_FORMAT_MJPEG) {
+					strlcpy(f->description, "Motion-JPEG", sizeof(f->description));
+					f->flags = V4L2_FMT_FLAG_COMPRESSED;
+				} else {
+					strlcpy(f->description, "H.264", sizeof(f->description));
+					f->flags = V4L2_FMT_FLAG_COMPRESSED;
+				}
+				return 0;
+			}
+			index++;
+		}
+		return -EINVAL;
+	}
+
+	/* Fallback if descriptors are not available */
+	if (f->index >= ARRAY_SIZE(uvc_formats))
+		return -EINVAL;
+
+	f->pixelformat = uvc_formats[f->index].fcc;
+	if (f->pixelformat == V4L2_PIX_FMT_MJPEG || f->pixelformat == V4L2_PIX_FMT_H264)
+		f->flags = V4L2_FMT_FLAG_COMPRESSED;
+	else
+		f->flags = 0;
+	strlcpy(f->description, "Video Format", sizeof(f->description));
+	return 0;
+}
+
+static int
+uvc_v4l2_enum_framesizes(struct file *file, void *fh,
+			 struct v4l2_frmsizeenum *fsize)
+{
+	struct video_device *vdev = video_devdata(file);
+	struct uvc_device *uvc = video_get_drvdata(vdev);
+	const struct uvc_descriptor_header * const *cls;
+	bool in_matching_format = false;
+	unsigned int frame_index = 0;
+
+	cls = uvc_v4l2_get_streaming_desc(uvc);
+	if (cls) {
+		for (; *cls; ++cls) {
+			const struct uvc_descriptor_header *h = *cls;
+
+			if (uvc_v4l2_is_format(h->bDescriptorSubType)) {
+				if (in_matching_format)
+					break;
+				if (uvc_v4l2_sub_type_to_fcc(h->bDescriptorSubType) == fsize->pixel_format)
+					in_matching_format = true;
+				continue;
+			}
+
+			if (in_matching_format && uvc_v4l2_is_frame(h->bDescriptorSubType)) {
+				if (frame_index == fsize->index) {
+					u16 width, height;
+					u8 interval_type;
+					const __le32 *intervals;
+
+					uvc_v4l2_get_frame_info(h, &width, &height,
+								&interval_type, &intervals);
+					fsize->type = V4L2_FRMSIZE_TYPE_DISCRETE;
+					fsize->discrete.width = width;
+					fsize->discrete.height = height;
+					return 0;
+				}
+				frame_index++;
+			}
+		}
+		return -EINVAL;
+	}
+
+	/* Fallback if descriptors are not available */
+	if (fsize->index == 0) {
+		fsize->type = V4L2_FRMSIZE_TYPE_DISCRETE;
+		fsize->discrete.width = 640;
+		fsize->discrete.height = 360;
+		return 0;
+	} else if (fsize->index == 1) {
+		fsize->type = V4L2_FRMSIZE_TYPE_DISCRETE;
+		fsize->discrete.width = 1280;
+		fsize->discrete.height = 720;
+		return 0;
+	} else if (fsize->index == 2 && fsize->pixel_format == V4L2_PIX_FMT_MJPEG) {
+		fsize->type = V4L2_FRMSIZE_TYPE_DISCRETE;
+		fsize->discrete.width = 1920;
+		fsize->discrete.height = 1080;
+		return 0;
+	}
+	return -EINVAL;
+}
+
+static int
+uvc_v4l2_enum_frameintervals(struct file *file, void *fh,
+			     struct v4l2_frmivalenum *fival)
+{
+	struct video_device *vdev = video_devdata(file);
+	struct uvc_device *uvc = video_get_drvdata(vdev);
+	const struct uvc_descriptor_header * const *cls;
+	bool in_matching_format = false;
+
+	cls = uvc_v4l2_get_streaming_desc(uvc);
+	if (cls) {
+		for (; *cls; ++cls) {
+			const struct uvc_descriptor_header *h = *cls;
+
+			if (uvc_v4l2_is_format(h->bDescriptorSubType)) {
+				if (in_matching_format)
+					break;
+				if (uvc_v4l2_sub_type_to_fcc(h->bDescriptorSubType) == fival->pixel_format)
+					in_matching_format = true;
+				continue;
+			}
+
+			if (in_matching_format && uvc_v4l2_is_frame(h->bDescriptorSubType)) {
+				u16 width, height;
+				u8 interval_type;
+				const __le32 *intervals;
+
+				uvc_v4l2_get_frame_info(h, &width, &height,
+							&interval_type, &intervals);
+				if (width == fival->width && height == fival->height) {
+					if (interval_type == 0) {
+						fival->type = V4L2_FRMIVAL_TYPE_STEPWISE;
+						fival->stepwise.min.numerator = le32_to_cpu(intervals[0]);
+						fival->stepwise.min.denominator = 10000000;
+						fival->stepwise.max.numerator = le32_to_cpu(intervals[1]);
+						fival->stepwise.max.denominator = 10000000;
+						fival->stepwise.step.numerator = le32_to_cpu(intervals[2]);
+						fival->stepwise.step.denominator = 10000000;
+						return 0;
+					}
+					if (fival->index >= interval_type)
+						return -EINVAL;
+					fival->type = V4L2_FRMIVAL_TYPE_DISCRETE;
+					fival->discrete.numerator = le32_to_cpu(intervals[fival->index]);
+					fival->discrete.denominator = 10000000;
+					return 0;
+				}
+			}
+		}
+		return -EINVAL;
+	}
+
+	/* Fallback */
+	if (fival->index == 0) {
+		fival->type = V4L2_FRMIVAL_TYPE_DISCRETE;
+		fival->discrete.numerator = 333333;
+		fival->discrete.denominator = 10000000;
+		return 0;
+	} else if (fival->index == 1) {
+		fival->type = V4L2_FRMIVAL_TYPE_DISCRETE;
+		fival->discrete.numerator = 166666;
+		fival->discrete.denominator = 10000000;
+		return 0;
+	} else if (fival->index == 2) {
+		fival->type = V4L2_FRMIVAL_TYPE_DISCRETE;
+		fival->discrete.numerator = 666666;
+		fival->discrete.denominator = 10000000;
+		return 0;
+	}
+	return -EINVAL;
 }
 
 static int
@@ -261,6 +519,9 @@ const struct v4l2_ioctl_ops uvc_v4l2_ioctl_ops = {
 	.vidioc_querycap = uvc_v4l2_querycap,
 	.vidioc_g_fmt_vid_out = uvc_v4l2_get_format,
 	.vidioc_s_fmt_vid_out = uvc_v4l2_set_format,
+	.vidioc_enum_fmt_vid_out = uvc_v4l2_enum_format,
+	.vidioc_enum_framesizes = uvc_v4l2_enum_framesizes,
+	.vidioc_enum_frameintervals = uvc_v4l2_enum_frameintervals,
 	.vidioc_reqbufs = uvc_v4l2_reqbufs,
 	.vidioc_querybuf = uvc_v4l2_querybuf,
 	.vidioc_qbuf = uvc_v4l2_qbuf,
