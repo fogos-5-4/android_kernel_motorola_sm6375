@@ -129,14 +129,20 @@ static int uvcg_video_ep_queue(struct uvc_video *video, struct usb_request *req)
 {
 	int ret;
 
+	if (!video->ep || !video->ep->desc || video->uvc->state == UVC_STATE_DISCONNECTED)
+		return -ESHUTDOWN;
+
 	ret = usb_ep_queue(video->ep, req, GFP_ATOMIC);
 	if (ret < 0) {
 		uvcg_err(&video->uvc->func, "Failed to queue request (%d).\n",
 			 ret);
 
-		/* Isochronous endpoints can't be halted. */
-		if (usb_endpoint_xfer_bulk(video->ep->desc))
-			usb_ep_set_halt(video->ep);
+		/* If the endpoint is disabled the descriptor may be NULL. */
+		if (video->ep && video->ep->desc) {
+			/* Isochronous endpoints can't be halted. */
+			if (usb_endpoint_xfer_bulk(video->ep->desc))
+				usb_ep_set_halt(video->ep);
+		}
 	}
 
 	return ret;
@@ -198,6 +204,9 @@ uvc_video_complete(struct usb_ep *ep, struct usb_request *req)
 		goto requeue;
 	}
 
+	if (!video->ep || !video->ep->desc || video->uvc->state == UVC_STATE_DISCONNECTED)
+		goto requeue;
+
 	spin_lock_irqsave(&video->queue.irqlock, flags);
 	buf = uvcg_queue_head(&video->queue);
 	if (buf == NULL) {
@@ -230,7 +239,8 @@ uvc_video_free_requests(struct uvc_video *video)
 
 	for (i = 0; i < UVC_NUM_REQUESTS; ++i) {
 		if (video->req[i]) {
-			usb_ep_free_request(video->ep, video->req[i]);
+			if (video->ep)
+				usb_ep_free_request(video->ep, video->req[i]);
 			video->req[i] = NULL;
 		}
 
@@ -306,6 +316,9 @@ int uvcg_video_pump(struct uvc_video *video)
 	 * handler ???
 	 */
 
+	if (!video->ep || !video->ep->desc || video->uvc->state == UVC_STATE_DISCONNECTED)
+		return 0;
+
 	while (1) {
 		/* Retrieve the first available USB request, protected by the
 		 * request lock.
@@ -364,7 +377,7 @@ int uvcg_video_enable(struct uvc_video *video, int enable)
 
 	if (!enable) {
 		for (i = 0; i < UVC_NUM_REQUESTS; ++i)
-			if (video->req[i])
+			if (video->req[i] && video->ep && video->ep->desc)
 				usb_ep_dequeue(video->ep, video->req[i]);
 
 		uvc_video_free_requests(video);
