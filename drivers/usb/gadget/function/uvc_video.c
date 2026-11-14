@@ -204,8 +204,10 @@ uvc_video_complete(struct usb_ep *ep, struct usb_request *req)
 		goto requeue;
 	}
 
-	if (!video->ep || !video->ep->desc || video->uvc->state == UVC_STATE_DISCONNECTED)
+	if (!video->ep || !video->ep->desc || video->uvc->state == UVC_STATE_DISCONNECTED) {
+		uvcg_queue_cancel(queue, 0);
 		goto requeue;
+	}
 
 	spin_lock_irqsave(&video->queue.irqlock, flags);
 	buf = uvcg_queue_head(&video->queue);
@@ -381,6 +383,7 @@ int uvcg_video_enable(struct uvc_video *video, int enable)
 				usb_ep_dequeue(video->ep, video->req[i]);
 
 		uvc_video_free_requests(video);
+		uvcg_queue_cancel(&video->queue, 0);
 		uvcg_queue_enable(&video->queue, 0);
 		return 0;
 	}
