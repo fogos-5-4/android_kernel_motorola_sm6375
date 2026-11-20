@@ -50,8 +50,8 @@ static inline bool task_fits_max(struct task_struct *p, int cpu);
  */
 
 #ifdef CONFIG_SCHED_BORE
-unsigned int sysctl_sched_latency			= 24000000ULL;
-static unsigned int normalized_sysctl_sched_latency	= 24000000ULL;
+unsigned int sysctl_sched_latency			= 16000000ULL;
+static unsigned int normalized_sysctl_sched_latency	= 16000000ULL;
 #else // CONFIG_SCHED_BORE
 unsigned int sysctl_sched_latency			= 10000000ULL;
 static unsigned int normalized_sysctl_sched_latency	= 10000000ULL;
@@ -69,20 +69,24 @@ static unsigned int normalized_sysctl_sched_latency	= 10000000ULL;
  * (BORE default SCHED_TUNABLESCALING_NONE = *1 constant)
  * (CFS  default SCHED_TUNABLESCALING_LOG  = *(1+ilog(ncpus))
  */
+#ifdef CONFIG_SCHED_BORE
+enum sched_tunable_scaling sysctl_sched_tunable_scaling = SCHED_TUNABLESCALING_NONE;
+#else
 enum sched_tunable_scaling sysctl_sched_tunable_scaling = SCHED_TUNABLESCALING_LOG;
+#endif
 
 /*
  * Minimal preemption granularity for CPU-bound tasks:
  *
- * (BORE default: 3 msec constant, units: nanoseconds)
+ * (BORE default: 2 msec constant, units: nanoseconds)
  * (CFS  default: 0.75 msec * (1 + ilog(ncpus)), units: nanoseconds)
  */
 #ifdef CONFIG_SCHED_BORE
-unsigned int sysctl_sched_min_granularity			= 3000000ULL;
-unsigned int normalized_sysctl_sched_min_granularity		= 3000000ULL;
+unsigned int sysctl_sched_min_granularity			= 2000000ULL;
+unsigned int normalized_sysctl_sched_min_granularity		= 2000000ULL;
 #else // CONFIG_SCHED_BORE
-unsigned int sysctl_sched_min_granularity			= 3000000ULL
-static unsigned int normalized_sysctl_sched_min_granularity	= 3000000ULL
+unsigned int sysctl_sched_min_granularity			= 3000000ULL;
+static unsigned int normalized_sysctl_sched_min_granularity	= 3000000ULL;
 #endif // CONFIG_SCHED_BORE
 
 /*
@@ -103,16 +107,16 @@ unsigned int sysctl_sched_child_runs_first __read_mostly;
  * and reduces their over-scheduling. Synchronous workloads will still
  * have immediate wakeup/sleep latencies.
  *
- * (BORE default: 4 msec constant, units: nanoseconds)
+ * (BORE default: 2 msec constant, units: nanoseconds)
  * (CFS  default: 1 msec * (1 + ilog(ncpus)), units: nanoseconds)
  */
 
 #ifdef CONFIG_SCHED_BORE
-unsigned int sysctl_sched_wakeup_granularity			= 4000000UL;
-unsigned int normalized_sysctl_sched_wakeup_granularity	= 4000000UL;
+unsigned int sysctl_sched_wakeup_granularity			= 2000000UL;
+unsigned int normalized_sysctl_sched_wakeup_granularity	= 2000000UL;
 #else // CONFIG_SCHED_BORE
-unsigned int sysctl_sched_wakeup_granularity			= 2000000UL
-static unsigned int normalized_sysctl_sched_wakeup_granularity	= 2000000UL
+unsigned int sysctl_sched_wakeup_granularity			= 2000000UL;
+static unsigned int normalized_sysctl_sched_wakeup_granularity	= 2000000UL;
 #endif // CONFIG_SCHED_BORE
 
 const_debug unsigned int sysctl_sched_migration_cost	= 500000UL;
